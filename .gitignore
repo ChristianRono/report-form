@@ -1,0 +1,9 @@
+# Never commit credentials
+.streamlit/secrets.toml
+submissions_local.json
+
+# Python
+__pycache__/
+*.pyc
+.env
+.venv/
