@@ -282,52 +282,99 @@ def get_sheet(credentials_dict: dict, spreadsheet_id: str):
     client = gspread.authorize(creds)
     sh = client.open_by_key(spreadsheet_id)
 
-    # Ensure sheet tabs exist
-    existing = [ws.title for ws in sh.worksheets()]
+    required_tabs = {
+        "Submissions": SHEET_HEADERS,
+        "Objectives": [
+            "submission_id", "pillar", "reporting_date",
+            "obj_code", "daily_target", "daily_achievement",
+            "pct_achievement", "status"
+        ]
+    }
 
-    for tab in ["Submissions", "Objectives"]:
-        if tab not in existing:
-            ws = sh.add_worksheet(title=tab, rows=1000, cols=30)
-            if tab == "Submissions":
-                ws.append_row(SHEET_HEADERS)
-            else:
-                ws.append_row(["submission_id", "pillar", "reporting_date",
-                                "obj_code", "daily_target", "daily_achievement",
-                                "pct_achievement", "status"])
+    existing_tabs = [ws.title for ws in sh.worksheets()]
+
+    for tab, headers in required_tabs.items():
+        if tab not in existing_tabs:
+            ws = sh.add_worksheet(title=tab, rows=1000, cols=len(headers))
+        else:
+            ws = sh.worksheet(tab)
+
+        # --- FORCE HEADERS ---
+        current = ws.row_values(1)
+        if current != headers:
+            ws.clear()
+            ws.resize(rows=1000, cols=len(headers))
+            ws.update("A1", [headers])
 
     return sh
 
+def safe_append(ws, row, headers):
+    """Append row safely without column shifting"""
+    # Force correct length
+    row = row[:len(headers)] + [""] * (len(headers) - len(row))
+
+    # Find next row
+    next_row = len(ws.get_all_values()) + 1
+
+    # Always write from column A
+    ws.update(f"A{next_row}", [row])
+
+
 def append_submission(sh, record: dict, objectives: list):
-    """Write one report submission across two sheet tabs."""
-    sub_id = f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    """Write one report submission across two sheet tabs safely."""
+
+    # Unique ID (no collisions)
+    sub_id = f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+
     record["submission_id"] = sub_id
     record["submitted_at"]  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     record["objectives_json"] = json.dumps(objectives)
 
-    # Submissions tab
-    row = [record.get(h, "") for h in SHEET_HEADERS]
-    sh.worksheet("Submissions").append_row(row, value_input_option="USER_ENTERED")
+    # ------------------ SUBMISSIONS ------------------
+    sub_ws = sh.worksheet("Submissions")
 
-    # Objectives tab — one row per objective
+    sub_row = [record.get(h, "") for h in SHEET_HEADERS]
+    safe_append(sub_ws, sub_row, SHEET_HEADERS)
+
+    # ------------------ OBJECTIVES ------------------
     obj_ws = sh.worksheet("Objectives")
+
+    OBJECTIVE_HEADERS = [
+        "submission_id", "pillar", "reporting_date",
+        "obj_code", "daily_target", "daily_achievement",
+        "pct_achievement", "status"
+    ]
+
+    rows = []
+
     for obj in objectives:
-        pct = None
+        pct = ""
         try:
-            t, a = float(obj.get("target", 0) or 0), float(obj.get("achievement", 0) or 0)
+            t = float(obj.get("target", 0) or 0)
+            a = float(obj.get("achievement", 0) or 0)
             if t > 0:
                 pct = round(a / t * 100, 1)
         except:
             pass
-        obj_ws.append_row([
+
+        row = [
             sub_id,
             record.get("pillar",""),
             record.get("reporting_date",""),
             obj.get("code",""),
             obj.get("target",""),
             obj.get("achievement",""),
-            pct if pct is not None else "",
+            pct,
             obj.get("status",""),
-        ], value_input_option="USER_ENTERED")
+        ]
+
+        # Normalize row
+        row = row[:len(OBJECTIVE_HEADERS)] + [""] * (len(OBJECTIVE_HEADERS) - len(row))
+        rows.append(row)
+
+    # Batch write (faster + safer)
+    start_row = len(obj_ws.get_all_values()) + 1
+    obj_ws.update(f"A{start_row}", rows)
 
     return sub_id
 
